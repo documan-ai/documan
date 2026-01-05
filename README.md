@@ -4,7 +4,7 @@
 
 Claude Code, Cursor, and other AI tools can search and understand your documentation in real-time.
 
-**Full documentation:** [docs.documan.ai](https://docs.documan.ai)
+**Full documentation:** [documan.ai](https://documan.ai)
 
 ## Key Features
 
@@ -28,10 +28,12 @@ DOCUMAN_DOCS_FILES=docs/**/*.md,README.md
 DOCUMAN_HTTP_PORT=3000' > .env
 
 # Run
-./documan fix      # Auto-fix frontmatter
-./documan lint     # Check frontmatter, links, duplicates
-./documan import   # Import to database
-./documan serve    # Start server
+./documan fix         # Auto-fix frontmatter
+./documan lint        # Check frontmatter, links, duplicates
+./documan import      # Import to database
+# Optional: Enable semantic search for MCP server (requires DOCUMAN_OPENAI_API_KEY)
+# ./documan vectorize
+./documan serve       # Start server
 ```
 
 ### Option 2: Docker
@@ -51,6 +53,8 @@ docker run -d --name documan \
 docker exec -t documan /documan/bin/documan fix
 docker exec -t documan /documan/bin/documan lint
 docker exec -t documan /documan/bin/documan import
+# Optional: Enable semantic search for MCP server (requires DOCUMAN_OPENAI_API_KEY)
+# docker exec -t documan /documan/bin/documan vectorize
 ```
 
 Web UI: `http://localhost:3000`
@@ -58,6 +62,8 @@ Web UI: `http://localhost:3000`
 MCP Server: `http://localhost:3000/mcp`
 
 For production CI/CD and docker-compose, see [Docker Setup Guide](https://docs.documan.ai/getting-started/docker-setup).
+
+For semantic search setup (vectorize command), see [Commands](https://docs.documan.ai/commands#vectorize).
 
 ## Connect AI Tools
 
