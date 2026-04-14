@@ -49,7 +49,29 @@ ask() {
     echo "${reply:-$default}"
 }
 
-# Idempotently ensure an env file has all required variables.
+# Read a value from an env file. Returns empty string if not found.
+# Usage: read_env_value <file> <key>
+read_env_value() {
+    local file="$1" key="$2"
+    grep "^${key}=" "$file" 2>/dev/null | head -1 | sed "s/^${key}=//; s/^'//; s/'$//" || true
+}
+
+# Replace a key's value in a file (portable, no sed -i).
+# Usage: replace_env_value <file> <key> <value>
+replace_env_value() {
+    local file="$1" key="$2" value="$3"
+    local tmp="${file}.tmp.$$"
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "${key}="*) echo "${key}=${value}" ;;
+            *)          echo "$line" ;;
+        esac
+    done < "$file" > "$tmp"
+    mv "$tmp" "$file"
+}
+
+# Ensure an env file has all required variables.
+# Missing keys are appended. Existing keys are left unchanged.
 # Usage: ensure_env_file <file> <var1> <var2> ...
 ensure_env_file() {
     local file="$1"; shift
@@ -61,20 +83,42 @@ ensure_env_file() {
         return
     fi
 
-    local added=0
+    local changed=0
     for var in "${vars[@]}"; do
         local key="${var%%=*}"
         if ! grep -q "^${key}=" "$file" 2>/dev/null; then
             echo "$var" >> "$file"
-            added=1
+            changed=1
         fi
     done
 
-    if [ "$added" -eq 1 ]; then
+    if [ "$changed" -eq 1 ]; then
         info "Updated $file (added missing variables)"
     else
-        info "Found $file (all variables present)"
+        info "Found $file (no changes needed)"
     fi
+}
+
+# Update specific keys in an env file with user-provided values.
+# Only overwrites keys that are explicitly passed.
+# Usage: update_env_values <file> <var1> <var2> ...
+update_env_values() {
+    local file="$1"; shift
+    [ ! -f "$file" ] && return
+
+    local changed=0
+    for var in "$@"; do
+        local key="${var%%=*}"
+        local value="${var#*=}"
+        if grep -q "^${key}=" "$file" 2>/dev/null; then
+            local current
+            current=$(grep "^${key}=" "$file" | head -1 | sed "s/^${key}=//")
+            if [ "$current" != "$value" ]; then
+                replace_env_value "$file" "$key" "$value"
+                changed=1
+            fi
+        fi
+    done
 }
 
 # Idempotently create a file from a content function.
@@ -165,8 +209,14 @@ prompt_config() {
     PROJECT_NAME="${DOCUMAN_PROJECT_NAME:-}"
     PORT="${DOCUMAN_HTTP_PORT:-}"
 
-    [ -z "$PROJECT_NAME" ] && PROJECT_NAME=$(ask "Project name" "$DEFAULT_PROJECT_NAME")
-    [ -z "$PORT" ] && PORT=$(ask "HTTP port" "$DEFAULT_PORT")
+    # Pre-fill from existing .env if available
+    if [ -f ".env" ]; then
+        [ -z "$PROJECT_NAME" ] && PROJECT_NAME=$(read_env_value .env DOCUMAN_PROJECT_NAME)
+        [ -z "$PORT" ] && PORT=$(read_env_value .env DOCUMAN_HTTP_PORT)
+    fi
+
+    PROJECT_NAME=$(ask "Project name" "${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}")
+    PORT=$(ask "HTTP port" "${PORT:-$DEFAULT_PORT}")
 
     PROJECT_NAME="${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}"
     PORT="${PORT:-$DEFAULT_PORT}"
@@ -198,27 +248,30 @@ create_docs() {
 }
 
 create_env() {
-    local -a vars=(
+    # All variables with defaults
+    local -a all_vars=(
         "DOCUMAN_PROJECT_NAME='${PROJECT_NAME}'"
         "DOCUMAN_HTTP_PORT=${PORT}"
         "DOCUMAN_OPENAI_API_KEY="
         "DOCUMAN_LICENSE_KEY="
     )
 
-    local -a example_vars=(
-        "DOCUMAN_PROJECT_NAME='My Docs'"
-        "DOCUMAN_HTTP_PORT=${DEFAULT_PORT}"
-        "DOCUMAN_OPENAI_API_KEY="
-        "DOCUMAN_LICENSE_KEY="
-    )
-
     if [ "$MODE" = "binary" ]; then
-        vars+=("DOCUMAN_DB_PATH=./documan.db" "DOCUMAN_DOCS_FILES='**/*.md'")
-        example_vars+=("DOCUMAN_DB_PATH=./documan.db" "DOCUMAN_DOCS_FILES='**/*.md'")
+        all_vars+=("DOCUMAN_DB_PATH=./documan.db" "DOCUMAN_DOCS_FILES='docs/**/*.md'")
     fi
 
-    ensure_env_file ".env.example" "${example_vars[@]}"
-    ensure_env_file ".env" "${vars[@]}"
+    # Only project name and port are user-provided — these get overwritten
+    local -a user_vars=(
+        "DOCUMAN_PROJECT_NAME='${PROJECT_NAME}'"
+        "DOCUMAN_HTTP_PORT=${PORT}"
+    )
+
+    # Add missing variables, then overwrite user-provided values
+    ensure_env_file ".env.example" "${all_vars[@]}"
+    update_env_values ".env.example" "${user_vars[@]}"
+
+    ensure_env_file ".env" "${all_vars[@]}"
+    update_env_values ".env" "${user_vars[@]}"
 }
 
 create_dockerfile() {
@@ -244,13 +297,54 @@ create_docker_compose() {
         return
     fi
 
-    # Append service (add services: key if missing)
+    # No services key — append both
     if ! grep -q '^services:' "$target"; then
-        echo "" >> "$target"
-        echo "services:" >> "$target"
+        { echo ""; echo "services:"; _content_compose_service; } >> "$target"
+        info "Updated $target (added documan service)"
+        return
     fi
 
-    _content_compose_service >> "$target"
+    # Insert documan service at the end of the services: block.
+    # The services block ends before the next top-level key (a line starting
+    # with a non-space character that isn't a comment) or at end of file.
+    local tmp="${target}.tmp.$$"
+    local in_services=false
+    local inserted=false
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Detect entering services block
+        if [ "$line" = "services:" ]; then
+            in_services=true
+            echo "$line"
+            continue
+        fi
+
+        # Detect next top-level key (non-indented, non-empty, non-comment)
+        if $in_services && ! $inserted; then
+            case "$line" in
+                ""|"#"*|" "*|"	"*)
+                    # Still inside services or blank/comment line
+                    echo "$line"
+                    continue
+                    ;;
+                *)
+                    # Hit next top-level key — insert service before it
+                    _content_compose_service
+                    echo ""
+                    inserted=true
+                    ;;
+            esac
+        fi
+
+        echo "$line"
+    done < "$target" > "$tmp"
+
+    # If we were in services but never hit another top-level key (services is last)
+    if $in_services && ! $inserted; then
+        _content_compose_service >> "$tmp"
+    fi
+
+    mv "$tmp" "$target"
     info "Updated $target (added documan service)"
 }
 
@@ -367,10 +461,10 @@ start_docker() {
     docker compose up -d documan
     info "Container started"
 
-    docker compose exec -t documan /documan/bin/documan fix
+    docker compose exec -T documan /documan/bin/documan fix
     info "Fixed frontmatter"
 
-    docker compose exec -t documan /documan/bin/documan import
+    docker compose exec -T documan /documan/bin/documan import
     info "Imported documentation"
 }
 
@@ -536,7 +630,7 @@ WORKDIR /documan/data
 
 # Configure your project
 ENV DOCUMAN_PROJECT_NAME='${PROJECT_NAME}'
-ENV DOCUMAN_DOCS_FILES='**/*.md'
+ENV DOCUMAN_DOCS_FILES='docs/**/*.md'
 ENV DOCUMAN_EXCLUDED_FILES=''
 ENV DOCUMAN_HTTP_PORT=${PORT}
 ENV DOCUMAN_OPENAI_EMBEDDING_MODEL='text-embedding-3-small'
