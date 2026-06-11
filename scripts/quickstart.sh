@@ -596,7 +596,7 @@ A Documan skill for AI coding tools has been added to `.claude/commands/documan.
 - [Frontmatter guide](https://docs.documan.ai/getting-started/markdown-frontmatter) — how to structure pages and navigation menu
 - [Showcase](https://docs.documan.ai/getting-started/markdown-showcase) — all supported markdown features and rendering
 - [Commands](https://docs.documan.ai/getting-started/commands) — CLI commands reference (fix, lint, import, vectorize, serve)
-- [Configuration](https://docs.documan.ai/getting-started/configuration) — all environment variables explained
+- [Configuration](https://docs.documan.ai/configuration) — all environment variables explained
 
 
 ## Deployment
